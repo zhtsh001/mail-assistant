@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2026-08-28T12:00:00.000Z",
+  "sinceHours": 72,
+  "count": 2,
+  "messages": [
+    {
+      "id": "fake-school-1",
+      "sender": "Course Office <course@example.edu>",
+      "subject": "Project proposal due Friday",
+      "receivedAt": "2026-08-28T10:00:00.000Z",
+      "mailbox": "Inbox",
+      "snippet": "Please submit the project proposal by Friday at 5 PM. Reply if you need an extension.",
+      "unsubscribeUrls": []
+    },
+    {
+      "id": "fake-newsletter-1",
+      "sender": "Example Newsletter <news@example.com>",
+      "subject": "Weekly digest",
+      "receivedAt": "2026-08-28T09:00:00.000Z",
+      "mailbox": "Inbox",
+      "snippet": "This is a fictional weekly newsletter used only for testing.",
+      "unsubscribeUrls": ["https://example.com/unsubscribe/fake-token"]
+    }
+  ]
+}
