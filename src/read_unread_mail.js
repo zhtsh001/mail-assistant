@@ -61,6 +61,8 @@ function run(argv) {
       subject: clean(safe(() => message.subject(), "(无主题)")),
       receivedAt: received instanceof Date ? received.toISOString() : "",
       mailbox: mailbox ? clean(safe(() => mailbox.name(), "")) : "",
+      localID: clean(safe(() => message.id(), "")),
+      replyTo: clean(safe(() => message.replyTo(), "")),
       snippet: content.slice(0, 6000),
       unsubscribeUrls: httpUrls(listUnsubscribe)
     });

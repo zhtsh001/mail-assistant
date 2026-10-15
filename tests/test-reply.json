@@ -1,0 +1,16 @@
+{
+  "count": 1,
+  "messages": [
+    {
+      "id": "fictional-reply@example.test",
+      "localID": "123",
+      "sender": "Course Office <course@example.test>",
+      "replyTo": "Course Office <course@example.test>",
+      "subject": "Office hours",
+      "receivedAt": "2026-10-14T10:00:00.000Z",
+      "mailbox": "Inbox",
+      "snippet": "Would you like to attend office hours? Let us know your availability. This is fictional test data.",
+      "unsubscribeUrls": []
+    }
+  ]
+}

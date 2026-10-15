@@ -12,7 +12,8 @@ if [[ ! -d "$SOURCE_APP" ]]; then
   exit 1
 fi
 
-if [[ ! -x "/Applications/ChatGPT.app/Contents/Resources/codex" ]]; then
+source "$SOURCE_APP/Contents/Resources/find_codex.sh"
+if ! find_codex >/dev/null; then
   print "没有找到 Mac 版 ChatGPT/Codex。请先安装并登录，再重新运行此安装器。"
   read -k 1 "?按任意键关闭…"
   exit 1
@@ -24,5 +25,5 @@ codesign --verify --deep --strict "$TARGET_APP"
 open -R "$TARGET_APP"
 
 print ""
-print "安装完成。首次打开时，请允许邮件管家以只读方式访问 Mail。"
+print "安装完成。首次打开时，请允许邮件管家访问 Mail。分析保持只读，回复草稿需审阅确认后创建。"
 read -k 1 "?按任意键关闭…"

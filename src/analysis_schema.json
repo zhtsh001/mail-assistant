@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "analysis": { "type": "string" },
+    "cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "summary": { "type": "string" },
+          "deadline": { "type": "string" },
+          "suggestion": { "type": "string" }
+        },
+        "required": ["id", "summary", "deadline", "suggestion"]
+      }
+    }
+  },
+  "required": ["analysis", "cards"]
+}

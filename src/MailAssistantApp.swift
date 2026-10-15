@@ -13,11 +13,62 @@ struct ConversationItem: Identifiable, Equatable {
     let text: String
 }
 
+struct MailMessage: Codable, Identifiable {
+    let id: String
+    let sender: String
+    let subject: String
+    let receivedAt: String
+    let mailbox: String
+    let snippet: String
+    let unsubscribeUrls: [String]
+    let localID: String?
+    let replyTo: String?
+    var summary: String?
+    var deadline: String?
+    var suggestion: String?
+    var cardID: String { "\(id):\(localID ?? "")" }
+}
+
+struct MailSnapshot: Codable {
+    let messages: [MailMessage]
+    var count: Int { messages.count }
+    enum CodingKeys: String, CodingKey { case messages, count }
+    init(messages: [MailMessage]) { self.messages = messages }
+    init(from decoder: Decoder) throws {
+        messages = try decoder.container(keyedBy: CodingKeys.self).decode([MailMessage].self, forKey: .messages)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(messages, forKey: .messages)
+        try container.encode(count, forKey: .count)
+    }
+}
+
+struct AnalysisResult {
+    let text: String
+    let messages: [MailMessage]
+}
+
+struct StructuredAnalysis: Decodable {
+    struct Card: Decodable {
+        let id: String
+        let summary: String
+        let deadline: String
+        let suggestion: String
+    }
+    let analysis: String
+    let cards: [Card]
+}
+
 @MainActor
 final class MailAssistantModel: ObservableObject {
     @Published var conversation: [ConversationItem] = []
     @Published var isWorking = false
     @Published var statusText = "准备就绪"
+    @Published var messages: [MailMessage] = []
+    @Published var replyMessage: MailMessage?
+    @Published var replyBody = ""
+    @Published var actionError: String?
 
     private var hasStarted = false
 
@@ -53,7 +104,8 @@ final class MailAssistantModel: ObservableObject {
 
             switch result {
             case .success(let output):
-                conversation.append(.init(role: .assistant, text: output))
+                messages = output.messages
+                conversation.append(.init(role: .assistant, text: output.text))
                 statusText = "分析完成"
             case .failure(let error):
                 conversation.append(.init(role: .error, text: error.localizedDescription))
@@ -63,32 +115,130 @@ final class MailAssistantModel: ObservableObject {
         }
     }
 
-    private nonisolated static func execute(instruction: String?, context: String) -> Result<String, Error> {
+    func prepareReply(_ message: MailMessage) {
+        guard !isWorking else { return }
+        isWorking = true
+        statusText = "正在拟写回复…"
+        Task {
+            let result = await Task.detached {
+                Self.execute(instruction: nil, context: "", selectedMessage: message)
+            }.value
+            switch result {
+            case .success(let output):
+                replyBody = output.text
+                replyMessage = message
+                statusText = "请审阅回复草稿"
+            case .failure(let error):
+                actionError = error.localizedDescription
+                statusText = "拟写失败"
+            }
+            isWorking = false
+        }
+    }
+
+    func performMailAction(_ action: String, message: MailMessage, body: String = "") {
+        guard !isWorking else { return }
+        isWorking = true
+        Task {
+            let result = await Task.detached {
+                Self.executeMailAction(action, message: message, body: body)
+            }.value
+            switch result {
+            case .success(let text):
+                statusText = text
+                if action == "draft" { replyMessage = nil; replyBody = "" }
+            case .failure(let error):
+                actionError = error.localizedDescription
+                statusText = "操作未完成"
+            }
+            isWorking = false
+        }
+    }
+
+    private nonisolated static func executeMailAction(_ action: String, message: MailMessage, body: String) -> Result<String, Error> {
+        // Fixture mode must never open or create actual messages.
+        guard ProcessInfo.processInfo.environment["MAIL_ASSISTANT_INPUT_FILE"] == nil else {
+            return .failure(AssistantError("测试模式不操作真实邮箱。"))
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let request = directory.appendingPathComponent("request.json")
+            let data = try JSONSerialization.data(withJSONObject: ["action": action, "id": message.id,
+                "localID": message.localID ?? "", "body": body])
+            try data.write(to: request)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: request.path)
+            guard let script = Bundle.main.url(forResource: "mail_action", withExtension: "js") else {
+                throw AssistantError("缺少 Mail 操作组件，请重新安装。")
+            }
+            return runProcess("/usr/bin/osascript", arguments: ["-l", "JavaScript", script.path, request.path])
+        } catch { return .failure(error) }
+    }
+
+    private nonisolated static func runProcess(_ executable: String, arguments: [String], environment: [String: String]? = nil) -> Result<String, Error> {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard process.terminationStatus == 0, !text.isEmpty else {
+                return .failure(AssistantError(text.isEmpty ? "操作没有完成，请检查 Mail 权限、登录状态和网络。" : text))
+            }
+            return .success(text)
+        } catch { return .failure(error) }
+    }
+
+    private nonisolated static func execute(instruction: String?, context: String, selectedMessage: MailMessage? = nil) -> Result<AnalysisResult, Error> {
         guard let scriptURL = Bundle.main.url(forResource: "run_local", withExtension: "sh") else {
             return .failure(AssistantError("应用资源不完整，请重新安装邮件管家。"))
         }
 
-        let process = Process()
-        let outputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        var arguments = [scriptURL.path]
-        if let instruction { arguments.append("--instruction=\(instruction)") }
-        if !context.isEmpty { arguments.append("--context=\(context)") }
-        process.arguments = arguments
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         do {
-            try process.run()
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            let output = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            if process.terminationStatus == 0, !output.isEmpty {
-                return .success(output)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let snapshotURL = directory.appendingPathComponent("messages.json")
+            var arguments = [scriptURL.path, "--messages-file=\(snapshotURL.path)"]
+            var environment = ProcessInfo.processInfo.environment
+            if let selectedMessage {
+                let inputURL = directory.appendingPathComponent("input.json")
+                try JSONEncoder().encode(MailSnapshot(messages: [selectedMessage])).write(to: inputURL)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inputURL.path)
+                environment["MAIL_ASSISTANT_INPUT_FILE"] = inputURL.path
+                arguments.append("--draft-only")
+            } else {
+                arguments.append("--structured")
             }
-            return .failure(AssistantError(output.isEmpty ? "邮件分析没有完成，请确认 ChatGPT/Codex 已登录并且网络可用。" : output))
+            if let instruction { arguments.append("--instruction=\(instruction)") }
+            if !context.isEmpty { arguments.append("--context=\(context)") }
+            switch runProcess("/bin/zsh", arguments: arguments, environment: environment) {
+            case .failure(let error): return .failure(error)
+            case .success(let text):
+                let snapshot = try JSONDecoder().decode(MailSnapshot.self, from: Data(contentsOf: snapshotURL))
+                if selectedMessage == nil && !snapshot.messages.isEmpty {
+                    let structured = try JSONDecoder().decode(StructuredAnalysis.self, from: Data(text.utf8))
+                    let messages = snapshot.messages.map { source -> MailMessage in
+                        var message = source
+                        let cards = structured.cards.filter { $0.id == source.id }
+                        if cards.count == 1, let card = cards.first {
+                            message.summary = card.summary
+                            message.deadline = card.deadline
+                            message.suggestion = card.suggestion
+                        }
+                        return message
+                    }
+                    return .success(AnalysisResult(text: structured.analysis, messages: messages))
+                }
+                return .success(AnalysisResult(text: text, messages: snapshot.messages))
+            }
         } catch {
             return .failure(AssistantError("无法启动邮件分析：\(error.localizedDescription)"))
         }
@@ -122,6 +272,39 @@ struct ContentView: View {
         .frame(minWidth: 920, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { model.startOnce() }
+        .sheet(item: $model.replyMessage) { message in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("审阅回复草稿").font(.title2.bold())
+                Text(message.subject).font(.headline)
+                Text("回复给：\(message.replyTo?.isEmpty == false ? message.replyTo! : message.sender)")
+                    .foregroundStyle(.secondary)
+                Text("请核对收件人、事实和待填写内容。确认后将在 Mail 中创建草稿，由你在 Mail 中发送。")
+                    .font(.callout).foregroundStyle(.secondary)
+                TextEditor(text: $model.replyBody)
+                    .font(.body).padding(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
+                HStack {
+                    Button("取消") { model.replyMessage = nil; model.replyBody = "" }
+                        .disabled(model.isWorking)
+                    Spacer()
+                    if model.isWorking { ProgressView().controlSize(.small) }
+                    Button("确认，在 Mail 中创建草稿") {
+                        model.performMailAction("draft", message: message, body: model.replyBody)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isWorking || model.replyBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(24).frame(width: 650, height: 480)
+            .interactiveDismissDisabled(model.isWorking)
+            .alert("操作未完成", isPresented: Binding(
+                get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } }
+            )) { Button("好") { model.actionError = nil } } message: { Text(model.actionError ?? "") }
+        }
+        .alert("操作未完成", isPresented: Binding(
+            get: { model.actionError != nil && model.replyMessage == nil },
+            set: { if !$0 { model.actionError = nil } }
+        )) { Button("好") { model.actionError = nil } } message: { Text(model.actionError ?? "") }
     }
 
     private var sidebar: some View {
@@ -174,10 +357,10 @@ struct ContentView: View {
             Spacer()
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("只读模式", systemImage: "lock.shield.fill")
+                Label("操作由你确认", systemImage: "lock.shield.fill")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.green)
-                Text("不会自动发送、删除、移动或退订。涉及外部操作时，必须由你确认。")
+                Text("分析不更改邮件。打开原邮件可能标为已读；回复草稿审阅后才保存，发送需在 Mail 中完成。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -264,6 +447,14 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 18) {
+                    if !model.messages.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("本次邮件 · \(model.messages.count) 封").font(.headline)
+                            ForEach(Array(model.messages.enumerated()), id: \.element.cardID) { index, message in
+                                mailCard(message, number: index + 1)
+                            }
+                        }
+                    }
                     if model.conversation.isEmpty && model.isWorking {
                         welcomeLoading
                     }
@@ -282,6 +473,52 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func mailCard(_ message: MailMessage, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                Text("\(number)").font(.caption.bold()).foregroundStyle(.blue)
+                    .padding(7).background(.blue.opacity(0.09), in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    Button { model.performMailAction("open", message: message) } label: {
+                        Text(message.subject).font(.headline).multilineTextAlignment(.leading)
+                    }.buttonStyle(.plain).disabled(model.isWorking)
+                    Text(message.sender).font(.caption).foregroundStyle(.secondary)
+                    Text("\(message.mailbox) · \(receivedDate(message.receivedAt))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            Text(message.summary ?? String(message.snippet.prefix(220))).font(.callout)
+                .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+            if let deadline = message.deadline {
+                Label(deadline, systemImage: "calendar.badge.clock")
+                    .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
+            if let suggestion = message.suggestion {
+                Text("建议：\(suggestion)").font(.callout).textSelection(.enabled)
+            }
+            HStack {
+                Button {
+                    model.performMailAction("open", message: message)
+                } label: { Label("打开原邮件", systemImage: "arrow.up.forward.app") }
+                Button { model.prepareReply(message) } label: {
+                    Label("拟写回复", systemImage: "square.and.pencil")
+                }
+                Spacer()
+            }
+            .buttonStyle(.bordered).disabled(model.isWorking)
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func receivedDate(_ value: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        return date?.formatted(date: .abbreviated, time: .shortened) ?? value
     }
 
     private var welcomeLoading: some View {

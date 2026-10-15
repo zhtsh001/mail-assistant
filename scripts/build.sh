@@ -13,6 +13,7 @@ mkdir -p "$DIST_DIR" "$TEMP_DIR/邮件管家.app/Contents/MacOS" "$TEMP_DIR/邮�
 xcrun swiftc \
   -parse-as-library \
   -O \
+  -module-cache-path "$TEMP_DIR/ModuleCache" \
   -target arm64-apple-macos13.0 \
   -framework SwiftUI \
   -framework AppKit \
@@ -21,6 +22,9 @@ xcrun swiftc \
 
 cp "$SOURCE_DIR/Info.plist" "$TEMP_DIR/邮件管家.app/Contents/Info.plist"
 cp "$SOURCE_DIR/run_local.sh" "$TEMP_DIR/邮件管家.app/Contents/Resources/run_local.sh"
+cp "$SOURCE_DIR/find_codex.sh" "$TEMP_DIR/邮件管家.app/Contents/Resources/find_codex.sh"
+cp "$SOURCE_DIR/mail_action.js" "$TEMP_DIR/邮件管家.app/Contents/Resources/mail_action.js"
+cp "$SOURCE_DIR/analysis_schema.json" "$TEMP_DIR/邮件管家.app/Contents/Resources/analysis_schema.json"
 cp "$SOURCE_DIR/read_unread_mail.js" "$TEMP_DIR/邮件管家.app/Contents/Resources/read_unread_mail.js"
 chmod 755 "$TEMP_DIR/邮件管家.app/Contents/MacOS/MailAssistant"
 chmod 700 "$TEMP_DIR/邮件管家.app/Contents/Resources/run_local.sh"
