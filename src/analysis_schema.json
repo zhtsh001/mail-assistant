@@ -2,7 +2,6 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "analysis": { "type": "string" },
     "cards": {
       "type": "array",
       "items": {
@@ -12,11 +11,15 @@
           "id": { "type": "string" },
           "summary": { "type": "string" },
           "deadline": { "type": "string" },
-          "suggestion": { "type": "string" }
+          "suggestion": { "type": "string" },
+          "priority": { "type": "string", "enum": ["urgent", "important", "normal", "low"] },
+          "needsReply": { "type": "boolean" },
+          "dueToday": { "type": "boolean" },
+          "risky": { "type": "boolean" }
         },
-        "required": ["id", "summary", "deadline", "suggestion"]
+        "required": ["id", "summary", "deadline", "suggestion", "priority", "needsReply", "dueToday", "risky"]
       }
     }
   },
-  "required": ["analysis", "cards"]
+  "required": ["cards"]
 }

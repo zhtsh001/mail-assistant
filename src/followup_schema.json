@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": { "type": "string", "enum": ["answer", "draft", "clarify"] },
+    "text": { "type": "string" }
+  },
+  "required": ["kind", "text"]
+}

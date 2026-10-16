@@ -1,114 +1,46 @@
 import AppKit
 import SwiftUI
 
-struct ConversationItem: Identifiable, Equatable {
-    enum Role {
-        case assistant
-        case user
-        case error
-    }
-
-    let id = UUID()
-    let role: Role
-    let text: String
-}
-
-struct MailMessage: Codable, Identifiable {
-    let id: String
-    let sender: String
-    let subject: String
-    let receivedAt: String
-    let mailbox: String
-    let snippet: String
-    let unsubscribeUrls: [String]
-    let localID: String?
-    let replyTo: String?
-    var summary: String?
-    var deadline: String?
-    var suggestion: String?
-    var cardID: String { "\(id):\(localID ?? "")" }
-}
-
-struct MailSnapshot: Codable {
-    let messages: [MailMessage]
-    var count: Int { messages.count }
-    enum CodingKeys: String, CodingKey { case messages, count }
-    init(messages: [MailMessage]) { self.messages = messages }
-    init(from decoder: Decoder) throws {
-        messages = try decoder.container(keyedBy: CodingKeys.self).decode([MailMessage].self, forKey: .messages)
-    }
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(messages, forKey: .messages)
-        try container.encode(count, forKey: .count)
-    }
-}
-
-struct AnalysisResult {
-    let text: String
-    let messages: [MailMessage]
-}
-
-struct StructuredAnalysis: Decodable {
-    struct Card: Decodable {
-        let id: String
-        let summary: String
-        let deadline: String
-        let suggestion: String
-    }
-    let analysis: String
-    let cards: [Card]
-}
-
 @MainActor
 final class MailAssistantModel: ObservableObject {
-    @Published var conversation: [ConversationItem] = []
+    @Published var workspace = MailWorkspace()
     @Published var isWorking = false
     @Published var statusText = "准备就绪"
-    @Published var messages: [MailMessage] = []
-    @Published var replyMessage: MailMessage?
-    @Published var replyBody = ""
+    @Published var filter: MailFilter = .all
     @Published var actionError: String?
 
     private var hasStarted = false
+    var messages: [MailMessage] { workspace.messages }
+    var selectedMessage: MailMessage? { workspace.selectedMessage }
+    var conversation: [ConversationItem] { workspace.conversation }
+    var replyBody: String {
+        get { workspace.draft }
+        set { workspace.draft = newValue }
+    }
+    var visibleMessages: [MailMessage] { messages.filter { filter.includes($0) } }
 
     func startOnce() {
         guard !hasStarted else { return }
         hasStarted = true
-        run(instruction: nil)
+        refresh()
     }
 
-    func run(instruction: String?) {
+    func refresh() {
         guard !isWorking else { return }
-        let cleaned = instruction?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let priorContext = conversation.suffix(6).map { item in
-            let role: String
-            switch item.role {
-            case .assistant: role = "邮件管家"
-            case .user: role = "用户"
-            case .error: role = "错误"
-            }
-            return "\(role)：\(item.text)"
-        }.joined(separator: "\n\n").suffix(12_000)
-        if let cleaned, !cleaned.isEmpty {
-            conversation.append(.init(role: .user, text: cleaned))
-        }
-
         isWorking = true
-        statusText = cleaned?.isEmpty == false ? "正在处理指令…" : "正在整理未读邮件…"
+        statusText = "正在整理邮件卡片…"
 
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                Self.execute(instruction: cleaned, context: String(priorContext))
+                Self.execute(task: "triage")
             }.value
 
             switch result {
             case .success(let output):
-                messages = output.messages
-                conversation.append(.init(role: .assistant, text: output.text))
-                statusText = "分析完成"
+                workspace.replaceMessages(output.messages)
+                statusText = "\(messages.count) 封邮件 · \(messages.filter { $0.needsReply == true }.count) 封需回复"
             case .failure(let error):
-                conversation.append(.init(role: .error, text: error.localizedDescription))
+                actionError = error.localizedDescription
                 statusText = "需要处理"
             }
             isWorking = false
@@ -117,23 +49,65 @@ final class MailAssistantModel: ObservableObject {
 
     func prepareReply(_ message: MailMessage) {
         guard !isWorking else { return }
+        workspace.select(message)
+        if !replyBody.isEmpty {
+            statusText = "已恢复此邮件的草稿，可在下方继续修改"
+            return
+        }
+        submit(instruction: "请为这封邮件拟写简短得体的回复。", task: "draft")
+    }
+
+    func select(_ message: MailMessage) {
+        guard !isWorking else { return }
+        workspace.select(message)
+    }
+
+    @discardableResult
+    func submit(instruction: String, task: String = "assist") -> Bool {
+        guard !isWorking else { return false }
+        let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return false }
+        if let command = MailFilter.command(instruction) {
+            filter = command
+            statusText = "\(command.rawValue) · \(visibleMessages.count) 封"
+            return true
+        }
+        guard let message = selectedMessage else {
+            actionError = "请先选择一封邮件，再提问或说明回复意图。"
+            return false
+        }
+        if task == "revise" && replyBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            actionError = "这封邮件还没有草稿，请先拟写回复。"
+            return false
+        }
+        let id = message.cardID
+        let context = workspace.context(for: id)
+        let currentDraft = replyBody
+        workspace.append(.init(role: .user, text: instruction), to: id)
         isWorking = true
-        statusText = "正在拟写回复…"
+        statusText = task == "draft" || task == "revise" ? "正在处理回复草稿…" : "正在处理所选邮件…"
         Task {
             let result = await Task.detached {
-                Self.execute(instruction: nil, context: "", selectedMessage: message)
+                Self.execute(task: task, instruction: instruction, context: context,
+                             selectedMessage: message, currentDraft: currentDraft)
             }.value
             switch result {
             case .success(let output):
-                replyBody = output.text
-                replyMessage = message
-                statusText = "请审阅回复草稿"
+                if output.kind == "draft" {
+                    workspace.threads[id, default: MailThread()].draft = output.text
+                    workspace.append(.init(role: .assistant, text: "草稿已更新，请在编辑区审阅。"), to: id)
+                    statusText = "草稿已更新，尚未保存到 Mail"
+                } else {
+                    workspace.append(.init(role: .assistant, text: output.text), to: id)
+                    statusText = output.kind == "clarify" ? "需要补充信息" : "已回答所选邮件的问题"
+                }
             case .failure(let error):
-                actionError = error.localizedDescription
-                statusText = "拟写失败"
+                workspace.append(.init(role: .error, text: error.localizedDescription), to: id)
+                statusText = "处理未完成"
             }
             isWorking = false
         }
+        return true
     }
 
     func performMailAction(_ action: String, message: MailMessage, body: String = "") {
@@ -146,7 +120,9 @@ final class MailAssistantModel: ObservableObject {
             switch result {
             case .success(let text):
                 statusText = text
-                if action == "draft" { replyMessage = nil; replyBody = "" }
+                if action == "draft" {
+                    workspace.append(.init(role: .assistant, text: text), to: message.cardID)
+                }
             case .failure(let error):
                 actionError = error.localizedDescription
                 statusText = "操作未完成"
@@ -196,7 +172,7 @@ final class MailAssistantModel: ObservableObject {
         } catch { return .failure(error) }
     }
 
-    private nonisolated static func execute(instruction: String?, context: String, selectedMessage: MailMessage? = nil) -> Result<AnalysisResult, Error> {
+    private nonisolated static func execute(task: String, instruction: String = "", context: String = "", selectedMessage: MailMessage? = nil, currentDraft: String = "") -> Result<MailTaskResult, Error> {
         guard let scriptURL = Bundle.main.url(forResource: "run_local", withExtension: "sh") else {
             return .failure(AssistantError("应用资源不完整，请重新安装邮件管家。"))
         }
@@ -206,38 +182,40 @@ final class MailAssistantModel: ObservableObject {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             defer { try? FileManager.default.removeItem(at: directory) }
             let snapshotURL = directory.appendingPathComponent("messages.json")
-            var arguments = [scriptURL.path, "--messages-file=\(snapshotURL.path)"]
+            var arguments = [scriptURL.path, "--task=\(task)", "--messages-file=\(snapshotURL.path)"]
             var environment = ProcessInfo.processInfo.environment
             if let selectedMessage {
                 let inputURL = directory.appendingPathComponent("input.json")
                 try JSONEncoder().encode(MailSnapshot(messages: [selectedMessage])).write(to: inputURL)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inputURL.path)
                 environment["MAIL_ASSISTANT_INPUT_FILE"] = inputURL.path
-                arguments.append("--draft-only")
-            } else {
-                arguments.append("--structured")
             }
-            if let instruction { arguments.append("--instruction=\(instruction)") }
+            if task != "triage", selectedMessage == nil { throw AssistantError("请先选择邮件。") }
+            if !currentDraft.isEmpty {
+                let draftURL = directory.appendingPathComponent("draft.txt")
+                try currentDraft.write(to: draftURL, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: draftURL.path)
+                arguments.append("--draft-file=\(draftURL.path)")
+            }
+            if !instruction.isEmpty { arguments.append("--instruction=\(instruction)") }
             if !context.isEmpty { arguments.append("--context=\(context)") }
             switch runProcess("/bin/zsh", arguments: arguments, environment: environment) {
             case .failure(let error): return .failure(error)
             case .success(let text):
                 let snapshot = try JSONDecoder().decode(MailSnapshot.self, from: Data(contentsOf: snapshotURL))
-                if selectedMessage == nil && !snapshot.messages.isEmpty {
+                if task == "triage" {
                     let structured = try JSONDecoder().decode(StructuredAnalysis.self, from: Data(text.utf8))
-                    let messages = snapshot.messages.map { source -> MailMessage in
-                        var message = source
-                        let cards = structured.cards.filter { $0.id == source.id }
-                        if cards.count == 1, let card = cards.first {
-                            message.summary = card.summary
-                            message.deadline = card.deadline
-                            message.suggestion = card.suggestion
-                        }
-                        return message
-                    }
-                    return .success(AnalysisResult(text: structured.analysis, messages: messages))
+                    return .success(MailTaskResult(text: "", kind: "cards", messages: try structured.applying(to: snapshot.messages)))
                 }
-                return .success(AnalysisResult(text: text, messages: snapshot.messages))
+                if task == "assist" {
+                    let result = try JSONDecoder().decode(FollowUpResult.self, from: Data(text.utf8))
+                    guard ["answer", "draft", "clarify"].contains(result.kind),
+                          !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw AssistantError("追问结果无效，请重试。")
+                    }
+                    return .success(MailTaskResult(text: result.text, kind: result.kind, messages: []))
+                }
+                return .success(MailTaskResult(text: text, kind: task == "question" ? "answer" : "draft", messages: []))
             }
         } catch {
             return .failure(AssistantError("无法启动邮件分析：\(error.localizedDescription)"))
@@ -245,23 +223,14 @@ final class MailAssistantModel: ObservableObject {
     }
 }
 
-struct AssistantError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
-}
-
 struct ContentView: View {
     @StateObject private var model = MailAssistantModel()
     @State private var draft = ""
+    @State private var taskMode = "assist"
+    @State private var confirmSave = false
+    @State private var pendingMessage: MailMessage?
+    @State private var pendingBody = ""
     @FocusState private var inputFocused: Bool
-
-    private let quickActions: [(String, String, String)] = [
-        ("只看今天", "calendar.badge.clock", "只列出今天必须处理或即将截止的邮件"),
-        ("需要回复", "arrowshape.turn.up.left.fill", "列出所有需要我回复的邮件，并分别生成简短草稿"),
-        ("退订检查", "envelope.badge.minus", "检查哪些邮件适合安全退订；可疑邮件不要点击退订链接"),
-        ("风险检查", "exclamationmark.shield.fill", "检查钓鱼、诈骗、异常付款和可疑链接风险")
-    ]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -272,37 +241,20 @@ struct ContentView: View {
         .frame(minWidth: 920, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { model.startOnce() }
-        .sheet(item: $model.replyMessage) { message in
-            VStack(alignment: .leading, spacing: 16) {
-                Text("审阅回复草稿").font(.title2.bold())
-                Text(message.subject).font(.headline)
-                Text("回复给：\(message.replyTo?.isEmpty == false ? message.replyTo! : message.sender)")
-                    .foregroundStyle(.secondary)
-                Text("请核对收件人、事实和待填写内容。确认后将在 Mail 中创建草稿，由你在 Mail 中发送。")
-                    .font(.callout).foregroundStyle(.secondary)
-                TextEditor(text: $model.replyBody)
-                    .font(.body).padding(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
-                HStack {
-                    Button("取消") { model.replyMessage = nil; model.replyBody = "" }
-                        .disabled(model.isWorking)
-                    Spacer()
-                    if model.isWorking { ProgressView().controlSize(.small) }
-                    Button("确认，在 Mail 中创建草稿") {
-                        model.performMailAction("draft", message: message, body: model.replyBody)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isWorking || model.replyBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .confirmationDialog("确认在 Mail 中创建这封邮件的回复草稿？", isPresented: $confirmSave, titleVisibility: .visible) {
+            Button("创建草稿（不发送）") {
+                if let message = pendingMessage {
+                    model.performMailAction("draft", message: message, body: pendingBody)
                 }
+                pendingMessage = nil
+                pendingBody = ""
             }
-            .padding(24).frame(width: 650, height: 480)
-            .interactiveDismissDisabled(model.isWorking)
-            .alert("操作未完成", isPresented: Binding(
-                get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } }
-            )) { Button("好") { model.actionError = nil } } message: { Text(model.actionError ?? "") }
+            Button("取消", role: .cancel) { pendingMessage = nil; pendingBody = "" }
+        } message: {
+            Text("\(pendingMessage?.subject ?? "")\n回复给：\(pendingMessage?.replyTo ?? pendingMessage?.sender ?? "")\n请先核对草稿正文。发送仍需在 Mail 中手动完成。")
         }
         .alert("操作未完成", isPresented: Binding(
-            get: { model.actionError != nil && model.replyMessage == nil },
+            get: { model.actionError != nil },
             set: { if !$0 { model.actionError = nil } }
         )) { Button("好") { model.actionError = nil } } message: { Text(model.actionError ?? "") }
     }
@@ -336,18 +288,19 @@ struct ContentView: View {
                     .textCase(.uppercase)
 
                 Button {
-                    model.run(instruction: nil)
+                    model.refresh()
                 } label: {
                     sidebarButtonLabel("重新整理未读", icon: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
                 .disabled(model.isWorking)
 
-                ForEach(quickActions, id: \.0) { title, icon, prompt in
+                ForEach(MailFilter.allCases, id: \.self) { filter in
                     Button {
-                        model.run(instruction: prompt)
+                        model.filter = filter
                     } label: {
-                        sidebarButtonLabel(title, icon: icon)
+                        sidebarButtonLabel(filter.rawValue, icon: filter.icon)
+                            .background(model.filter == filter ? Color.blue.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
                     .disabled(model.isWorking)
@@ -369,7 +322,7 @@ struct ContentView: View {
             .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .padding(22)
-        .frame(width: 250)
+        .frame(width: 210)
         .background(.ultraThinMaterial)
     }
 
@@ -419,9 +372,9 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("今日邮件简报")
+                    Text("邮件工作台")
                         .font(.title3.weight(.semibold))
-                    Text("最近 72 小时 · 最多 20 封未读邮件")
+                    Text("\(model.messages.count) 封 · \(model.messages.filter { $0.needsReply == true }.count) 封需回复 · 仅重新整理时刷新邮箱")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -444,34 +397,82 @@ struct ContentView: View {
     }
 
     private var conversationView: some View {
-        ScrollViewReader { proxy in
+        HSplitView {
             ScrollView {
                 LazyVStack(spacing: 18) {
-                    if !model.messages.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("本次邮件 · \(model.messages.count) 封").font(.headline)
-                            ForEach(Array(model.messages.enumerated()), id: \.element.cardID) { index, message in
-                                mailCard(message, number: index + 1)
+                    Text("\(model.filter.rawValue) · \(model.visibleMessages.count) 封").font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ForEach(Array(model.visibleMessages.enumerated()), id: \.element.cardID) { index, message in
+                        mailCard(message, number: index + 1)
+                    }
+                    if model.messages.isEmpty {
+                        if model.isWorking { welcomeLoading }
+                        else { Text("暂无近期未读邮件").foregroundStyle(.secondary) }
+                    } else if model.visibleMessages.isEmpty {
+                        Text("此筛选下没有邮件").foregroundStyle(.secondary)
+                    }
+                }
+                .padding(18)
+            }
+            .frame(minWidth: 310, idealWidth: 390, maxWidth: 470)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.42))
+
+            VStack(alignment: .leading, spacing: 12) {
+                if let message = model.selectedMessage {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("正在处理").font(.caption).foregroundStyle(.blue)
+                        Text(message.subject).font(.headline)
+                        Text(message.sender).font(.caption).foregroundStyle(.secondary)
+                        Text("追问只针对这封邮件，不重新读取邮箱。").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 12) {
+                                if model.conversation.isEmpty {
+                                    Text("在下方提问或说明回复意图，例如：告诉他我周五下午有空。")
+                                        .foregroundStyle(.secondary).font(.callout)
+                                }
+                                ForEach(model.conversation) { item in
+                                    messageBubble(item).id(item.id)
+                                }
                             }
                         }
+                        .onChange(of: model.conversation.count) { _ in
+                            if let last = model.conversation.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
                     }
-                    if model.conversation.isEmpty && model.isWorking {
-                        welcomeLoading
+                    .frame(minHeight: 90)
+                    if !model.replyBody.isEmpty {
+                        Divider()
+                        HStack {
+                            Text("回复草稿 · 可直接编辑").font(.headline)
+                            Spacer()
+                            Button("在 Mail 中创建草稿…") {
+                                pendingMessage = message
+                                pendingBody = model.replyBody
+                                confirmSave = true
+                            }
+                            .disabled(model.isWorking || model.replyBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        Text("回复给：\(message.replyTo?.isEmpty == false ? message.replyTo! : message.sender)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextEditor(text: Binding(get: { model.replyBody }, set: { model.replyBody = $0 }))
+                            .font(.body).padding(8).disabled(model.isWorking)
+                            .frame(minHeight: 160, idealHeight: 220)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+                        Text("可继续输入“再短一点”或“换成英文”；当前编辑内容会一起传给助手。")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
-                    ForEach(model.conversation) { item in
-                        messageBubble(item)
-                            .id(item.id)
-                    }
+                } else {
+                    Spacer()
+                    Image(systemName: "envelope.open").font(.largeTitle).foregroundStyle(.blue)
+                    Text("选择一封邮件开始处理").font(.headline)
+                    Text("每封邮件的对话与草稿独立保存于本次会话，切换卡片不会混用上下文。")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
                 }
-                .padding(26)
-                .frame(maxWidth: .infinity)
             }
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.42))
-            .onChange(of: model.conversation.count) { _ in
-                if let last = model.conversation.last {
-                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
-            }
+            .padding(18).frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -481,7 +482,7 @@ struct ContentView: View {
                 Text("\(number)").font(.caption.bold()).foregroundStyle(.blue)
                     .padding(7).background(.blue.opacity(0.09), in: Circle())
                 VStack(alignment: .leading, spacing: 4) {
-                    Button { model.performMailAction("open", message: message) } label: {
+                    Button { model.select(message) } label: {
                         Text(message.subject).font(.headline).multilineTextAlignment(.leading)
                     }.buttonStyle(.plain).disabled(model.isWorking)
                     Text(message.sender).font(.caption).foregroundStyle(.secondary)
@@ -501,17 +502,23 @@ struct ContentView: View {
             }
             HStack {
                 Button {
+                    model.select(message)
                     model.performMailAction("open", message: message)
                 } label: { Label("打开原邮件", systemImage: "arrow.up.forward.app") }
                 Button { model.prepareReply(message) } label: {
                     Label("拟写回复", systemImage: "square.and.pencil")
                 }
+                Button("选择") { model.select(message) }
                 Spacer()
             }
             .buttonStyle(.bordered).disabled(model.isWorking)
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(
+            model.selectedMessage?.cardID == message.cardID ? Color.blue : Color.clear, lineWidth: 2))
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .onTapGesture { model.select(message) }
     }
 
     private func receivedDate(_ value: String) -> String {
@@ -567,8 +574,20 @@ struct ContentView: View {
     }
 
     private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Picker("处理方式", selection: $taskMode) {
+                    Text("自动识别").tag("assist")
+                    Text("问邮件").tag("question")
+                    Text("写回复").tag("draft")
+                    Text("改草稿").tag("revise")
+                }
+                .frame(width: 210).disabled(model.isWorking)
+                Text(model.selectedMessage.map { "针对：\($0.subject)" } ?? "请先选择邮件，也可输入“只看今天”等筛选指令")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
         HStack(alignment: .bottom, spacing: 12) {
-            TextField("继续输入，例如：给第 1 封写一个更正式的回复", text: $draft, axis: .vertical)
+            TextField("例如：帮我婉拒 ／ 再短一点 ／ 这封邮件需要做什么？", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .focused($inputFocused)
@@ -588,6 +607,7 @@ struct ContentView: View {
             .disabled(!canSend)
             .keyboardShortcut(.return, modifiers: .command)
         }
+        }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
         .background(.ultraThinMaterial)
@@ -600,8 +620,7 @@ struct ContentView: View {
     private func sendDraft() {
         guard canSend else { return }
         let instruction = draft
-        draft = ""
-        model.run(instruction: instruction)
+        if model.submit(instruction: instruction, task: taskMode) { draft = "" }
         inputFocused = true
     }
 

@@ -20,7 +20,9 @@
 
 - Opening the app immediately starts an on-demand review of recent unread mail.
 - Use the sidebar for **Due today**, **Needs reply**, **Unsubscribe review**, or **Risk review**.
-- Type follow-up requests in the field at the bottom, such as “draft a formal reply to message 1” or “make it shorter.”
+- Select a mail card, then type an instruction such as “politely decline” or “make it shorter.” The target is shown above the composer; questions and draft edits do not refresh the inbox.
+- Choose Automatic, Ask, Draft, or Revise in the composer. Review and edit the draft in the right-hand panel, then choose Create draft in Mail and confirm.
+- Filters operate on existing cards without AI calls. Press Refresh to fetch the inbox again. Conversations and drafts are per message and remain in memory only until the app exits.
 - Results, reply drafts, and links stay inside Mail Assistant.
 - Use a source card to open the original in Mail (which may mark it read).
 - Select **Draft reply**, edit the text, then confirm **Create draft in Mail**. Mail saves and opens a reply using the original account and sender/Reply-To. Review and send from Mail yourself.
@@ -55,7 +57,9 @@
 
 - 打开应用即开始按需整理最近的未读邮件。
 - 左侧可以快速选择“只看今天”“需要回复”“退订检查”和“风险检查”。
-- 在底部输入框继续下指令，例如“给第 1 封写一个正式回复”或“再短一点”。
+- 先选择邮件卡片，再在底部输入“帮我婉拒”或“再短一点”。输入框上方会显示处理对象；追问不重新读取未读列表。
+- 可选择“自动识别、问邮件、写回复、改草稿”。在右侧编辑草稿后，点击“在 Mail 中创建草稿…”并确认。
+- 筛选只作用于现有卡片，不调用 AI；点击“重新整理”才刷新邮箱。每封邮件的对话、草稿独立保留在内存，退出应用后不保存。
 - 结果、链接和回复草稿都显示在邮件管家内部。
 - 邮件卡片可打开原邮件，此操作可能标为已读。
 - 点击“拟写回复”，编辑后选择“确认，在 Mail 中创建草稿”。Mail 使用原账号和真实回复地址保存并打开草稿；发送仍需手动完成。

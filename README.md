@@ -8,7 +8,7 @@ The app was designed for mixed personal, Gmail, Outlook, and managed Microsoft 3
 
 ## Features
 
-- Native SwiftUI interface with an inbox summary, quick actions, and a conversational input field.
+- Native SwiftUI workbench with mail cards and a selected-message conversation/draft panel; no long inbox briefing is generated.
 - One-click views for messages due today, messages needing replies, unsubscribe candidates, and suspicious mail.
 - Multi-turn follow-ups such as “draft a formal reply” followed by “make it shorter.”
 - Markdown rendering, selectable text, and clickable links.
@@ -32,7 +32,9 @@ The app was designed for mixed personal, Gmail, Outlook, and managed Microsoft 3
 4. The local Codex CLI analyzes the messages in a read-only sandbox.
 5. Results are displayed in the native app and temporary request files are removed.
 
-Follow-up instructions re-read the current unread set and include a limited amount of recent conversation context.
+Only opening the app or pressing Refresh reads the unread inbox. Follow-ups use the selected message's existing snapshot, its own recent conversation, and the current edited draft. Switching cards restores that message's draft and conversation for this app session. Session state is not persisted across app restarts.
+
+The composer supports Automatic, Ask, Draft, and Revise modes. Automatic distinguishes questions from drafting/editing requests; explicit modes let you choose. Without a selected message, the app asks you to select one. Sidebar filters and commands such as “只看今天” filter existing cards without model calls or inbox refreshes. “Due today” refers to today's tasks/deadlines, not messages received today.
 
 ## Safety and privacy
 
@@ -70,7 +72,14 @@ scripts/package.sh
 
 See [INSTALL.md](INSTALL.md) for installation and first-run instructions.
 
-Test action validation without accessing a real mailbox: `node tests/mail_action.test.cjs`.
+Test action safety and task prompt isolation without accessing a real mailbox:
+
+```bash
+node tests/mail_action.test.cjs
+node tests/task_prompts.test.cjs
+```
+
+State regression tests can be compiled with `xcrun swiftc src/MailWorkflow.swift tests/WorkflowTests.swift -o /tmp/mail-workflow-tests` and run with `/tmp/mail-workflow-tests tests/test-fixture.json` (select a stable SDK as above if needed).
 
 ### Runtime troubleshooting
 
@@ -109,6 +118,9 @@ dist/      Local build output; intentionally excluded from Git
 ### 主要特点
 
 - 原生 SwiftUI 界面，支持快捷筛选和连续对话。
+- 仅显示逐封邮件卡片，不生成长篇总分析。右侧显示所选邮件的独立对话和可编辑草稿。
+- 底部支持“自动识别、问邮件、写回复、改草稿”；已有草稿时“再短一点”会基于当前编辑正文修改。
+- 只有启动和“重新整理”才读取未读邮箱；追问使用所选邮件快照，筛选不调用模型。每封邮件的对话和草稿在本次应用会话内独立保留，重启应用后不保存。
 - 邮件卡片显示来源、收信时间和摘录，可打开原邮件。点击“拟写回复”，编辑并确认后在 Mail 中创建真实草稿，发送仍需手动完成。
 - 直接读取本机 Mail 中已经添加的所有账户，不需要 ChatGPT 分别登录 Gmail、Outlook 或学校 Microsoft 365。
 - 只在用户主动打开应用或提交指令时运行，不安装定时任务或后台监听。
